@@ -38,4 +38,6 @@
 
 * Plotting +/- deviations is not entirely trivial using the API plot function. Hack for now, but perhaps request some changes.
 
+* move the make.R to an actual MAKEFILE
+
 

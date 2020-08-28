@@ -5,23 +5,29 @@ output:
   flexdashboard::flex_dashboard:
     social: menu
     source_code: embed
+    vertical_layout: fill
 ---
 
 ```{r setup, include=FALSE, cache=TRUE, autodep=TRUE}
 library(covidcast)
 library(dplyr)
+library(tidyr)
 library(ggplot2)
+library(flexdashboard)
 knitr::opts_chunk$set(cache=TRUE, autodep=TRUE)
 
 df_fb1_st = covidcast_signal("fb-survey", "raw_cli", geo_type = "state")
 n_per_day = df_fb1_st %>% 
   group_by(time_value) %>% 
-  summarize(n = sum(sample_size)) 
+  summarize("Number of responses" = sum(sample_size)) 
 
 df_fb1 = covidcast_signal("fb-survey", "smoothed_cli")
 county_per_week = df_fb1 %>% 
   group_by(time_value) %>%
-  summarize(n = n())
+  summarize("Number of counties" = n())
+
+ts_views = inner_join(n_per_day, county_per_week) %>%
+  pivot_longer(-time_value)
 
 county_totals = df_fb1 %>% 
   group_by(geo_value) %>%
@@ -50,38 +56,52 @@ df_cor1 = covidcast_cor(df_fb1_act, df_in_act, by = "time_value",
 df_cor2 = covidcast_cor(df_fb2_act, df_in_act, by = "time_value",
                         method = "spearman")
 
-df_cor = rbind(df_cor1, df_cor2)
-df_cor$signal = c(rep("% CLI", nrow(df_cor1)), 
-                  rep("% CLI-in-community", nrow(df_cor2)))
+df_cor = bind_rows("% CLI" = df_cor1, "% CLI-in-community"=df_cor2, .id="signal")
 ```
 
 Sampling
 =====================
 
-Column
-----------------------
+Column 
+-----------------
 
-```{r, message = FALSE, warning = FALSE, fig.width = 5, fig.height = 10}
-
-ggplot(n_per_day, aes(x = time_value, y = n)) + 
-  geom_line() + geom_point() + theme_bw() + 
-  labs(x = "Date", y = "Number of Responses",
-       title = sprintf("Total responses: %i, mean per day: %i", 
-                       round(sum(n_per_day$n)), round(mean(n_per_day$n))))
+```{r, message = FALSE, warning = FALSE, fig.width=10, fig.height=6}
+ggplot(ts_views, aes(time_value, value)) +
+  geom_line() + geom_point() + theme_bw() +
+  labs(x="Date", y="")+
+  facet_wrap(~name, nrow=2, scales="free_y")
 ```
 
 Column
 ------------------
 
-
-```{r,fig.width=10,fig.height=5}
-ggplot(county_per_week, aes(x = time_value, y = n)) + 
-  geom_line() + geom_point() + theme_bw() + 
-  labs(x = "Date", y = "Number of Counties", 
-       title = sprintf("Unique counties: %i, mean per week: %i", 
-                       length(unique(df_fb1$geo_value)), 
-                       round(mean(county_per_week$n))))
+```{r}
+total_responses = round(sum(n_per_day$`Number of responses`))
+mean_daily = round(mean(n_per_day$`Number of responses`))
+unique_counties = length(unique(df_fb1$geo_value))
+mean_week = round(mean(county_per_week$`Number of counties`))
 ```
+
+### Total responses
+```{r}
+valueBox(total_responses)
+```
+
+### Mean daily responses
+```{r}
+valueBox(mean_daily)
+```
+
+### Number of unique counties
+```{r}
+valueBox(unique_counties)
+```
+
+### Mean unique counties per week
+```{r}
+valueBox(mean_week)
+```
+
 
 Coverage map
 ======
