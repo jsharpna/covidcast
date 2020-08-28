@@ -1,0 +1,100 @@
+---
+title: "Facebook Survey Deviations"
+author: "Delphi Group"
+output:
+  flexdashboard::flex_dashboard:
+    social: menu
+    source_code: embed
+    vertical_layout: fill
+---
+  
+
+```{r setup, include=FALSE}
+library(covidcast)
+library(tidyverse)
+library(lubridate)
+library(cowplot)
+
+today = Sys.Date()
+minus_2_weeks = today - days(15)
+
+
+fb_cli = covidcast_signal(
+  "fb-survey", "raw_cli", start_day = minus_2_weeks, geo_type = "state")
+most_recent = fb_cli %>% summarize(avail = max(time_value)) %>% pull()
+lagged = fb_cli %>% group_by(geo_value) %>% 
+  filter(time_value < most_recent, time_value > most_recent - days(15)) %>%
+  summarize(
+    ave_val = mean(value, na.rm=TRUE), 
+    sd_val = sd(value, na.rm=TRUE),
+    ave_samp = mean(sample_size, na.rm=TRUE),
+    sd_samp = sd(sample_size, na.rm=TRUE))
+last_release = fb_cli %>% filter(time_value==most_recent)
+merged = left_join(last_release, lagged, by="geo_value") %>%
+  mutate(
+    tstat_value = (value - ave_val)/sd_val,
+    tstat_sample = (sample_size - ave_samp)/sd_samp)
+
+tbreaks = c(-5,-2,-1,-.5,-.2,-.1,0,.1,.2,.5,1,2,5)
+tcolors = colorspace::diverging_hcl(length(tbreaks))
+```
+
+Facebook CLI
+=======
+
+```{r, fig.width=12,fig.height=6.75}
+vlist = list(
+  plot(merged),
+  plot(merged %>% mutate(value=ave_val), 
+     title = paste0("Average over previous 13 days")),
+  plot(merged %>% mutate(value=sd_val), title="SD over previous 13 days"),
+  plot(merged %>% mutate(value=tstat_value), 
+        choro_col = tcolors, choro_params = list(breaks=tbreaks),
+     title = paste0("T statistic for ", merged$time_value[1]))
+)
+plot_grid(plotlist=vlist, nrow=2)
+```
+
+FB CLI Sample Sizes
+==================
+
+```{r, fig.width=12,fig.height=6.75}
+
+srange = pretty(range(merged$sample_size)) %>% range()
+
+slist = list(
+  plot(merged %>% mutate(value=sample_size), range=srange,
+       title=paste0("Sample size for ", merged$time_value[1])),
+  plot(merged %>% mutate(value=ave_samp), range=srange,
+       title = paste0("Average sample size over previous 13 days")),
+  plot(merged %>% mutate(value=sd_samp), range=srange,
+       title="SD over previous 13 days"),
+  plot(merged %>% mutate(value=tstat_sample), 
+     choro_col = tcolors, choro_params = list(breaks=tbreaks),
+     title=paste0("T statistics for ", merged$time_value[1]))
+)
+plot_grid(plotlist=slist, nrow=2)
+```
+
+Time plots for potential anamolies
+============
+
+```{r, fig.width=12,fig.height=6.75}
+qval = quantile(abs(merged$tstat_value), .9)
+sval = quantile(abs(merged$tstat_sample), .9)
+bad = merged %>% mutate(
+  bad_obs = abs(tstat_value) > qval | abs(tstat_sample)>sval
+  ) %>% filter(bad_obs)
+
+ts_views = fb_cli %>% filter(geo_value %in% bad$geo_value) %>%
+  dplyr::select(geo_value, time_value, value, sample_size) %>% 
+  pivot_longer(-c("geo_value","time_value"))
+
+plotly::ggplotly(
+ggplot(ts_views, aes(time_value, value,color=geo_value)) +
+  geom_line() + 
+  geom_point() + facet_wrap(~name, nrow=2, scales = 'free_y') +
+  theme_cowplot() + xlab('Date') + ylab('')+
+  scale_color_viridis_d(name="state")
+)
+```
