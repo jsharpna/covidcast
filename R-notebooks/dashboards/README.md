@@ -18,6 +18,16 @@
 3. chloropleth of indicator (FB)
 4. correlations (FB) : see https://cmu-delphi.github.io/covidcast/R-notebooks/signal_correlations.html
 
+## Description of [fb-deviations](fb-deviations.html)
+
+* Chloropleths on first two tabs show (clockwise from top left) today's observation, the average of the previous two weeks, the t-stat for today, and the sd over the previous two weeks.
+
+* NA's are removed from previous period.
+
+* t-stat is (today-mean)/sd, each specific to the region.
+
+* Plots are made using the `{covidcast}` package, so NA's should appear as whatever the `plot.covidcast_signal` defaultss to (not sure at the moment)
+
 ## Suggestions and thoughts
 
 * Counts over time take a long time to pull from the API. It's fine to update these, but maybe put a bunch of indicators in one dashboard.
