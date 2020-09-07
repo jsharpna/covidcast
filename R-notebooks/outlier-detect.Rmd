@@ -1,0 +1,82 @@
+---
+title: "State deaths outliers"
+author: "Delphi Group"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+params:
+  window_size: 14
+  start_date: 2020-04-01
+  sig_cut: 2.5
+---
+
+
+
+```{r setup, warning=FALSE, message=FALSE}
+library(covidcast)
+library(tidyverse)
+library(lubridate)
+library(RcppRoll)
+library(cowplot)
+
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+
+window_size = params$window_size
+start_date = params$start_date
+sig_cut = params$sig_cut
+```
+
+Currently using only OH. Remake for all states. 
+
+```{r load-data}
+oh = suppressMessages(
+  covidcast_signal(
+  "jhu-csse","deaths_incidence_num", 
+  geo_type = "state", geo_values = "oh", 
+  start_day = start_date)
+)
+
+oh = oh %>% mutate(
+  fmean = roll_meanr(value, window_size), 
+  fsd = roll_sdr(value, window_size),
+  smean = roll_mean(value, window_size, fill=NA),
+  ssd = roll_sd(value, window_size, fill=NA),
+  flag = abs(value-fmean)/fsd > sig_cut | abs(value-smean)/ssd > sig_cut
+  )
+```
+
+Try faceting by state with `ggplot` and show only those with outliers.
+
+```{r render-plots}
+oh %>%
+  #filter(oh, time_value > ymd(start_date) + days(window_size)) %>%
+  ggplot(aes(time_value, value)) + 
+    geom_line(aes(color="observed")) +
+    geom_ribbon(aes(
+      fill="filtered",
+      ymin=fmean-sig_cut*fsd, 
+      ymax=fmean+sig_cut*fsd), alpha=.25) +
+    geom_ribbon(aes(
+      fill="smoothed",
+      ymin=smean-sig_cut*ssd, 
+      ymax=smean+sig_cut*ssd), alpha=.25) +
+    geom_line(aes(y=fmean, color="filtered")) + 
+    geom_line(aes(y=smean, color="smoothed")) +
+    geom_point(data=filter(oh, flag), aes(color="outliers")) +
+    #coord_cartesian(ylim=c(0,60)) +
+    theme_cowplot() + xlab("date") + 
+    ylab(attributes(oh)$metadata$signal) +
+    scale_fill_manual(breaks=c("filtered","smoothed"), 
+                      values=c("blue","darkgreen"))+
+    scale_color_manual(
+      breaks=c("observed", "filtered","smoothed","outliers"),
+      values = c("black", "blue","darkgreen","red"))
+```
+
+```{r display-outliers}
+oh %>% filter(flag) %>%
+  dplyr::select(geo_value,signal,time_value, value, fmean, fsd, smean, ssd) %>%
+  DT::datatable(rownames = NULL) %>% DT::formatSignif(~fmean+fsd+smean+ssd,3)
+```
+
