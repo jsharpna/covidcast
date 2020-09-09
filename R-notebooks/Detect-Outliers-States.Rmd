@@ -40,7 +40,6 @@ states <- states %>% group_by(geo_value) %>% mutate(
   fsd = roll_sdr(value, window_size),
   smean = roll_mean(value, window_size, fill=NA),
   ssd = roll_sd(value, window_size, fill=NA),
-  ssd = roll_sd(value, window_size, fill=NA),
   flag = abs(value-fmean)/fsd > sig_cut | abs(value-smean)/ssd > sig_cut
   
 )
