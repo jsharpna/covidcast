@@ -10,7 +10,7 @@ na_replace <- function(a,b){
 }
 
 corrections_multinom_roll <- function(
-  x, excess, flag, max_lag=Inf, expectations = NULL
+  x, excess, flag, time_value, FIPS, max_lag=Inf, expectations = NULL
 ){
   stopifnot(length(x)==length(excess), length(excess)==length(flag))
   stopifnot(is.logical(flag), max_lag==floor(max_lag), max_lag >= 1)
@@ -29,10 +29,17 @@ corrections_multinom_roll <- function(
     } else {
       ii_lag <- seq(ii-max_lag+1, ii-1)
     }
-    bin_w = expectations[ii_lag]/ sum(expectations[ii_lag])
-    repl = fc_round(excess[ii] * bin_w)
-    x[ii] = x[ii] - sum(repl)
-    x[ii_lag] = x[ii_lag] + repl
+    bin_w = pmax(expectations[ii_lag] / sum(expectations[ii_lag], na.rm = TRUE), 0)
+    bin_w[is.na(bin_w)] = 0
+    if(all(bin_w==0)) bin_w = rep(1/length(ii_lag), times=length(ii_lag))
+    set.seed(as.integer(ymd(time_value[ii]))*100L + FIPS[ii])
+    x[ii] = x[ii] - excess[ii]
+    x[ii_lag] = x[ii_lag] + sign(excess[ii]) * rmultinom(1, abs(excess[ii]), bin_w)
+    
+    #rounded version
+    #repl = fc_round(excess[ii] * bin_w)
+    #x[ii] = x[ii] - sum(repl)
+    #x[ii_lag] = x[ii_lag] + repl
   }
   x
 }
