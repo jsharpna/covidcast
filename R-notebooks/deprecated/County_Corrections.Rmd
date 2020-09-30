@@ -1,0 +1,255 @@
+---
+title: "County deaths corrections with backfilling"
+author: "Delphi Group"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+params:
+  window_size: 14
+  start_date: NULL
+  sig_cut: 3
+  size_cut: 20
+  sig_consec: 2.25
+  outlier_start_date: "2020-03-01"
+  cache_data: TRUE
+  backfill_lag: 14
+  excess_cut: 1.5
+  n_counties: 200
+  write_RDS: FALSE
+---
+
+```{r}
+library(covidcast)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(RcppRoll)
+library(cowplot)
+library(ggplot2)
+library(DT)
+library(ggforce)
+library(ggpubr)
+library(egg)
+library(grid)
+source("corrections-funs.R")
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+attach(params)
+```
+
+
+
+Data retrieval
+```{r grab-data, cache=params$cache_data}
+counties <-  suppressMessages(
+  covidcast_signal(
+  "usa-facts","confirmed_incidence_num", 
+  geo_type = "county", 
+  start_day = start_date)
+)
+```
+
+
+Filtering notes:
+0. Dump `xx000` FIPS codes. (These are so-called "mega counties").
+1. Keep top 200 counties sorted by total cases
+2. Counties whose maximum daily_confirmed_case < `size_cut` are not corrected
+
+```{r}
+filtered <- counties %>% group_by(geo_value) %>% 
+  summarise(
+    case_sum = sum(value, na.rm=TRUE),
+    max_value = max(value, na.rm = TRUE)) %>%
+  filter(as.numeric(geo_value) %% 1000 > 0) %>%
+  arrange(desc(case_sum)) %>% top_n(n_counties) %>%
+  filter(max_value >= size_cut)
+county_filtered <- subset(counties, counties$geo_value %in% filtered$geo_value)
+```
+
+
+```{r calculate-roll-stats}
+county_filtered <- county_filtered %>% group_by(geo_value)  %>% mutate(
+  fmean = roll_meanr(value, window_size),
+  smean = roll_mean(value, window_size, fill = NA),
+  fmedian = roll_medianr(value, window_size),
+  smedian = roll_median(value, window_size, fill = NA),
+  fsd = roll_sdr(value, window_size),
+  ssd = roll_sd(value, window_size,fill = NA),
+  fmad = roll_medianr(abs(value-fmedian), window_size,na.rm=TRUE),
+  smad = roll_median(abs(value-smedian), na.rm=TRUE),
+  ftstat = abs(value-fmedian)/fsd, # mad in denominator is wrong scale, 
+  ststat = abs(value-smedian)/ssd, # basically results in all the data flagged
+  flag = 
+    (abs(value) > size_cut & !is.na(ststat) & ststat > sig_cut) | # best case
+    (is.na(ststat) & abs(value) > size_cut & !is.na(ftstat) & ftstat > sig_cut) | 
+      # use filter if smoother is missing
+    (value < -size_cut & !is.na(ststat) & !is.na(ftstat)), # big negative
+    #(fmean > 10 & fmean< 20 & value > 2*sig_cut*fmean)
+  flag = flag | # these allow smaller values to also be outliers if they are consecutive
+    (dplyr::lead(flag) & !is.na(ststat) & ststat > sig_consec) | 
+    (dplyr::lag(flag) & !is.na(ststat) & ststat > sig_consec) |
+    (dplyr::lead(flag) & is.na(ststat) & ftstat > sig_consec) |
+    (dplyr::lag(flag) & is.na(ststat) & ftstat > sig_consec),
+    
+  )
+
+
+#Mapping counties to states
+
+STATE_TO_FIPS = c( ## copied from somewhere in the bowels of the code
+  'WA'='53', 'DE'='10', 'DC'='11', 'WI'='55', 'WV'='54', 'HI'='15',
+  'FL'='12', 'WY'='56', 'PR'='72', 'NJ'='34', 'NM'='35', 'TX'='48',
+  'LA'='22', 'NC'='37', 'ND'='38', 'NE'='31', 'TN'='47', 'NY'='36',
+  'PA'='42', 'AK'='02', 'NV'='32', 'NH'='33', 'VA'='51', 'CO'='08',
+  'CA'='06', 'AL'='01', 'AR'='05', 'VT'='50', 'IL'='17', 'GA'='13',
+  'IN'='18', 'IA'='19', 'MA'='25', 'AZ'='04', 'ID'='16', 'CT'='09',
+  'ME'='23', 'MD'='24', 'OK'='40', 'OH'='39', 'UT'='49', 'MO'='29',
+  'MN'='27', 'MI'='26', 'RI'='44', 'KS'='20', 'MT'='30', 'MS'='28',
+  'SC'='45', 'KY'='21', 'OR'='41', 'SD'='46',
+  'AS'='60', 'GU'='66', 'MP'='69', 'VI'='78', 'UM'='74'
+)
+
+county_filtered <-  county_filtered %>% mutate(FIP = substr(geo_value,1,2)) %>% mutate(state = names(STATE_TO_FIPS)[match(FIP,STATE_TO_FIPS)]) %>% select(-FIP) %>% relocate(state,.after=geo_value)
+
+```
+
+
+## visualize the outliers
+```{r fig.height = 70, fig.width = 18}
+
+
+df <- county_filtered %>% 
+  left_join(county_census, by=c("geo_value"="FIPS")) %>%
+  unite(county,c("state","CTYNAME"), sep = ", ") %>%
+  mutate(pop = POPESTIMATE2019/100000)
+df$county <- as.factor(df$county)
+
+  p <- ggplot(df %>% group_by(county)%>% filter(any(flag == 'TRUE')), aes(x=time_value, y=value/pop))+
+        geom_line(aes(color="observed")) +
+    geom_line(aes(y=fmean/pop, color="filtered")) + 
+    geom_line(aes(y=smean/pop, color="smoothed")) +
+    geom_point(data=filter(df, flag), aes(color="outliers")) +
+    facet_wrap_paginate(.~county,ncol=5,scales = 'free_y') + 
+    theme_cowplot() + xlab("date") + 
+    ylab(attributes(df)$metadata$signal) +
+    scale_fill_manual(breaks=c("filtered","smoothed"), 
+                      values=c("blue","darkgreen"))+
+    scale_color_manual(
+      breaks=c("observed", "filtered","smoothed","outliers"),
+      values = c("black", "blue","darkgreen","red")) +
+    ggtitle(paste0("Counties with Outliers"))
+            
+fixed_p <- set_panel_size(p,width  = unit(6, "cm"),height = unit(4, "cm"))
+  grid.newpage(recording = TRUE)
+
+  grid.draw(fixed_p)  
+  
+  #dev.off()
+  #34 states 
+#}
+```
+
+
+#Outliers' table
+```{r}
+outliers <-  df %>% group_by(county) %>% filter(flag == 'TRUE') %>%
+ select(county,signal,time_value, value, fmean, fsd, smean, ssd) %>% arrange(time_value)
+
+datatable(outliers,options = list(scrollX = TRUE, scrollY = "600px",paging = FALSE),rownames = NULL) %>% formatSignif(~fmean+fsd+smean+ssd,3)
+```
+
+
+
+## Make corrections
+
+Now we use the "multinomial" smoother to backfill the excess of any flagged outliers. Some notes:
+
+* We use a new function `corrections_multinom_roll()` to do the backfill.
+* It backfills deterministicly rather than randomly.
+* It rounds alternate days up or down to try to avoid too much integers such that the sum is the excess.
+* Optionally allows for filling non-uniformly.
+
+
+```{r}
+corrected_counties <- county_filtered %>% mutate(
+   FIPS = as.numeric(geo_value),
+   excess = value - na_replace(smedian, fmedian),
+    excess = floor(excess - excess_cut*sign(excess)*na_replace(smad,fmad)),
+  corrected = corrections_multinom_roll(value, excess, flag, time_value, FIPS, backfill_lag))
+
+
+```
+
+
+
+
+#Visualize corrected counties
+```{r show-corrections, fig.height = 80, fig.width = 20}
+corrected_counties %>%
+  select(geo_value, time_value, value, corrected, flag) %>%
+  pivot_longer(value:corrected) %>%
+  ggplot(aes(time_value)) + geom_line(aes(y=value,color=name)) +
+  geom_point(data = filter(corrected_counties, flag), aes(y=value), color="red") +
+  facet_wrap(~geo_value, scales = "free_y", ncol = 5) +
+  theme_cowplot() + xlab("date") + 
+  ylab(attributes(county_filtered)$metadata$signal) +
+  scale_color_viridis_d()
+```
+
+
+
+
+## Show all corrected time points
+```{r}
+vectorized_ifelse <- function(test, yes, no){
+  tmp = yes
+  tmp[!test] = no[!test]
+  tmp
+}
+sum_check = corrected_counties %>%
+  summarise(original = sum(value, na.rm=TRUE),
+            corrected = sum(corrected, na.rm = TRUE)) %>% ungroup() %>%
+  mutate(diffs = abs(original-corrected)) %>%
+  summarise(trouble = any(diffs != 0L))
+print(paste0("Any totals changed? ", sum_check))
+
+tosave = corrected_counties %>% 
+  mutate(output = abs(corrected - value) > 0) %>%
+  filter(output) %>% ungroup() %>%
+  dplyr::select(geo_value, time_value, value, corrected) %>%
+  transmute(
+    location_name = geo_value, 
+    value = corrected,
+    issue_date = NA,
+    variable_name = "jhu-csse_deaths_incidence_num",
+    #location = as.numeric(STATE_TO_FIPS[location_name]),
+    reference_date = time_value) %>%
+  filter(reference_date >= params$outlier_start_date) %>%
+  dplyr::select(location_name, reference_date, issue_date,
+                variable_name, value)
+
+corrected_counties %>% 
+  mutate(output = abs(corrected - value) > 0) %>%
+  filter(output) %>%
+  dplyr::select(geo_value, time_value, value, corrected) %>%
+  transmute(time_value=time_value, 
+            geo_value=geo_value,
+            orig_value = value,
+            replacement = corrected
+            ) %>%
+  datatable(
+    options = list(scrollX = TRUE, scrollY = "300px",paging = FALSE),
+    rownames = NULL) 
+```
+
+
+
+
+
+
+
+
+
+
+
+

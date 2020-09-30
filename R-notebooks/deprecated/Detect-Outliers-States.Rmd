@@ -1,0 +1,170 @@
+---
+title: "State deaths outliers"
+author: "Delphi Group"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+params:
+  window_size: 14
+  start_date: 2020-05-15
+  sig_cut: 2.5
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+library(covidcast)
+library(dplyr)
+#library(tidyverse)
+library(lubridate)
+library(RcppRoll)
+library(cowplot)
+library(ggplot2)
+library(DT)
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
+window_size = params$window_size
+start_date = params$start_date
+sig_cut = params$sig_cut
+```
+
+Retrieve data for all states
+```{r}
+states <-  suppressMessages(
+  covidcast_signal(
+  "jhu-csse","deaths_incidence_num", 
+  geo_type = "state", 
+  start_day = start_date)
+)
+
+states <- states %>% group_by(geo_value) %>% mutate(
+  fmean = roll_meanr(value, window_size),
+  fsd = roll_sdr(value, window_size),
+  smean = roll_mean(value, window_size, fill=NA),
+  ssd = roll_sd(value, window_size, fill=NA),
+  ftstat = abs(value-fmean)/fsd,
+  flag = abs(value) > 10 & 
+    (abs(value-fmean)/fsd > sig_cut | abs(value-smean)/ssd > sig_cut)
+)
+
+STATE_TO_FIPS = c( ## copied from somewhere in the bowels of the code
+  'WA'='53', 'DE'='10', 'DC'='11', 'WI'='55', 'WV'='54', 'HI'='15',
+  'FL'='12', 'WY'='56', 'PR'='72', 'NJ'='34', 'NM'='35', 'TX'='48',
+  'LA'='22', 'NC'='37', 'ND'='38', 'NE'='31', 'TN'='47', 'NY'='36',
+  'PA'='42', 'AK'='02', 'NV'='32', 'NH'='33', 'VA'='51', 'CO'='08',
+  'CA'='06', 'AL'='01', 'AR'='05', 'VT'='50', 'IL'='17', 'GA'='13',
+  'IN'='18', 'IA'='19', 'MA'='25', 'AZ'='04', 'ID'='16', 'CT'='09',
+  'ME'='23', 'MD'='24', 'OK'='40', 'OH'='39', 'UT'='49', 'MO'='29',
+  'MN'='27', 'MI'='26', 'RI'='44', 'KS'='20', 'MT'='30', 'MS'='28',
+  'SC'='45', 'KY'='21', 'OR'='41', 'SD'='46',
+  'AS'='60', 'GU'='66', 'MP'='69', 'VI'='78', 'UM'='74'
+)
+v = as.numeric(STATE_TO_FIPS)
+names(v) = names(STATE_TO_FIPS)
+
+aldens_corrections = tibble::tibble(
+  fips = as.numeric(c("34","17","25","25","48","29","10","34","34","48",
+                       "25","34","39","39","29", "19", "16", "16", "16", "54",
+                       "54")),
+  time_value = ymd("2020-06-25","2020-07-07","2020-06-01","2020-06-30",
+                  "2020-07-27","2020-07-23","2020-07-24","2020-07-22",
+                  "2020-07-29","2020-08-02","2020-08-20","2020-08-26",
+                  "2020-08-29","2020-08-30","2020-09-05", "2020-08-29",
+                  "2020-09-03", "2020-09-04", " 2020-09-05", "2020-08-29", 
+                  "2020-08-30"),
+  varname = c(rep(TRUE, 9), FALSE, rep(TRUE,11)),
+  imputed_val = c(40,37,62,29,194,8,1,17,18, 207, 344,5,22,22, 14,
+                  14, 10, 10, 10, 5, 6),
+  geo_value = tolower(names(v)[match(fips,v)])) %>%
+  filter(varname)
+```
+
+
+All-states plot matrix
+```{r fig.height = 30, fig.width = 10}
+states_corrections = left_join(states, aldens_corrections) %>%
+  mutate(geo_value = as.factor(geo_value))
+
+states_corrections %>%
+  ggplot(aes(time_value, value)) + 
+    geom_line(aes(color="observed")) +
+    # geom_ribbon(aes(
+    #   fill="filtered",
+    #   ymin=fmean-sig_cut*fsd, 
+    #   ymax=fmean+sig_cut*fsd), alpha=.25) +
+    # geom_ribbon(aes(
+    #   fill="smoothed",
+    #   ymin=smean-sig_cut*ssd, 
+    #   ymax=smean+sig_cut*ssd), alpha=.25) +
+    geom_line(aes(y=fmean, color="filtered")) + 
+    geom_line(aes(y=smean, color="smoothed")) +
+    geom_vline(data = filter(states_corrections, varname), 
+               aes(xintercept = time_value), color="purple") +
+    geom_point(data = filter(states_corrections, varname), 
+               aes(y=imputed_val, color="imputation")) +
+    geom_point(data=filter(states_corrections, flag), aes(color="outliers")) +
+    facet_wrap(.~geo_value,ncol=2,scales = 'free_y') + 
+    theme_cowplot() + xlab("date") + 
+    ylab(attributes(states)$metadata$signal) +
+    scale_fill_manual(breaks=c("filtered","smoothed"), 
+                      values=c("blue","darkgreen"))+
+    scale_color_manual(
+      breaks=c("observed", "filtered","smoothed","outliers","imputation"),
+      values = c("black", "blue","darkgreen","red","purple"))
+```
+
+```{r}
+nj = states_corrections %>% filter(geo_value == "nj")
+g1 = nj %>%
+  ggplot(aes(time_value, value)) + 
+  geom_line(aes(color="observed")) +
+    geom_line(aes(y=fmean, color="filtered")) + 
+    geom_line(aes(y=smean, color="smoothed")) +
+    geom_vline(data = filter(nj, varname), 
+               aes(xintercept = time_value), color="purple") +
+    geom_point(data = filter(nj, varname), 
+               aes(y=imputed_val, color="imputation")) +
+    geom_point(data=filter(nj, flag), aes(color="outliers")) +
+    theme_cowplot() + xlab("date") + 
+    ylab(attributes(states)$metadata$signal) +
+    scale_fill_manual(breaks=c("filtered","smoothed"), 
+                      values=c("blue","darkgreen"))+
+    scale_color_manual(
+      breaks=c("observed", "filtered","smoothed","outliers","imputation"),
+      values = c("black", "blue","darkgreen","red","purple")) 
+g2 = nj %>%
+  ggplot(aes(time_value, value)) + 
+    geom_line(aes(color="observed")) +
+    geom_line(aes(y=fmean, color="filtered")) + 
+    geom_line(aes(y=smean, color="smoothed")) +
+    geom_vline(data = filter(nj, varname), 
+               aes(xintercept = time_value), color="purple") +
+    geom_point(data = filter(nj, varname), 
+               aes(y=imputed_val, color="imputation")) +
+    geom_point(data=filter(nj, flag), aes(color="outliers")) +
+    theme_cowplot() + xlab("date") + 
+    ylab(attributes(states)$metadata$signal) +
+    scale_fill_manual(breaks=c("filtered","smoothed"), 
+                      values=c("blue","darkgreen"))+
+    scale_color_manual(
+      breaks=c("observed", "filtered","smoothed","outliers","imputation"),
+      values = c("black", "blue","darkgreen","red","purple")) +
+  coord_cartesian(ylim=c(-100,100))
+plot_grid(g1,g2,nrow=2)
+```
+
+Output the outliers
+
+```{r}
+outliers <- outlier <- states_corrections %>% group_by(geo_value) %>% 
+  filter(flag | varname) %>%
+  select(geo_value,time_value, value, fmean, fsd, smean, ssd, imputed_val, flag, ftstat)
+
+datatable(outlier,options = list(scrollX = TRUE, scrollY = "300px",paging = FALSE),rownames = NULL) %>% formatSignif(~fmean+fsd+smean+ssd+ftstat,3)
+```
+
+
+
+
+
+
+
+
