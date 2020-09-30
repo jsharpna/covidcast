@@ -12,10 +12,10 @@ params:
   size_cut: 20
   sig_consec: 2.25
   outlier_start_date: "2020-03-01"
-  cache_data: TRUE
+  cache_data: FALSE
   backfill_lag: 14
-  excess_cut: 1.5
-  write_RDS: FALSE
+  excess_cut: 0
+  write_RDS: TRUE
 ---
 
 ```{r setup, warning=FALSE, message=FALSE}
@@ -126,14 +126,14 @@ datatable(
 Now we use the "multinomial" smoother to backfill the excess of any flagged outliers. Some notes:
 
 * We use a new function `corrections_multinom_roll()` to do the backfill.
-* It backfills deterministicly rather than randomly.
-* It rounds alternate days up or down to try to avoid too much integers such that the sum is the excess.
+* It backfills randomly based on smoother as weights
 * Optionally allows for filling non-uniformly.
 * We treat the big New York outlier differently, it gets an infinite backfill.
 
 ```{r make-corrections}
 corrected_states = states %>%
   mutate(
+    # try using everything, not just the "excess"
     excess = value - na_replace(smedian, fmedian),
     excess = floor(excess - excess_cut*sign(excess)*na_replace(smad,fmad)),
     flag_big_ny = (geo_value == "ny" & time_value == ymd("2020-05-18")),
@@ -215,9 +215,9 @@ tosave = corrected_states %>%
   transmute(
     location_name = toupper(geo_value), 
     value = corrected,
-    issue_date = NA,
+    issue_date = as.Date(NA),
     variable_name = "jhu-csse_deaths_incidence_num",
-    location = as.numeric(STATE_TO_FIPS[location_name]),
+    location = STATE_TO_FIPS[location_name],
     reference_date = time_value) %>%
   filter(reference_date >= params$outlier_start_date) %>%
   dplyr::select(location, location_name, reference_date, issue_date,
@@ -238,7 +238,7 @@ corrected_states %>%
 ```
 
 ```{r eval=params$write_RDS}
-saveRDS(tosave, file="corrections_djm.RDS")
+saveRDS(tosave, file="state_corrections_djm.RDS")
 ```
 
 

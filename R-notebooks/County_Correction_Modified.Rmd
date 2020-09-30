@@ -1,5 +1,5 @@
 ---
-title: "County deaths corrections with backfilling"
+title: "County usa-facts confirmed case corrections with backfilling"
 author: "Delphi Group"
 date: "`r format(Sys.time(), '%B %d, %Y')`"
 output:
@@ -14,12 +14,11 @@ params:
   outlier_start_date: "2020-03-01"
   cache_data: TRUE
   backfill_lag: 14
-  excess_cut: 1.5
-  n_counties: 200
-  write_RDS: FALSE
+  excess_cut: 0
+  write_RDS: TRUE
 ---
 
-```{r}
+```{r, message=FALSE, warning=FALSE}
 library(covidcast)
 library(dplyr)
 library(tidyr)
@@ -31,40 +30,46 @@ library(DT)
 library(ggforce)
 library(ggpubr)
 library(egg)
+knitr::opts_chunk$set(warning = FALSE, message=FALSE)
 library(grid)
 source("corrections-funs.R")
-knitr::opts_chunk$set(warning = FALSE, message=FALSE)
 attach(params)
+
 ```
 
-
-
 Data retrieval
-```{r grab-data, cache=params$cache_data}
+```{r, cache=params$cache_data}
 counties <-  suppressMessages(
   covidcast_signal(
   "usa-facts","confirmed_incidence_num", 
   geo_type = "county", 
-  start_day = start_date)
+  start_day = "2020-03-01")
 )
 ```
 
 
-Filtering notes:
-0. Dump `xx000` FIPS codes. (These are so-called "mega counties").
-1. Keep top 200 counties sorted by total cases
-2. Counties whose maximum daily_confirmed_case < `size_cut` are not corrected
-
+Data Wrangling notes:
+* Only counties with > 30 days' available data will be selected
+* Counties whose maximum daily_confirmed_case <10 are filter out
+* Top 250 of counties sorted by total cases will be selected
+* 
 ```{r}
-filtered <- counties %>% group_by(geo_value) %>% 
+todump <- counties %>% group_by(geo_value) %>% 
   summarise(
-    case_sum = sum(value, na.rm=TRUE),
-    max_value = max(value, na.rm = TRUE)) %>%
-  filter(as.numeric(geo_value) %% 1000 > 0) %>%
-  arrange(desc(case_sum)) %>% top_n(n_counties) %>%
-  filter(max_value >= size_cut)
-county_filtered <- subset(counties, counties$geo_value %in% filtered$geo_value)
+    ava_value_count = sum(!is.na(value)),
+    case_sum = sum(value,na.rm = T),
+    max_case = max(value)
+    ) %>% 
+  filter(max_case>=10, 
+         ava_value_count>=30, 
+         as.numeric(geo_value) %% 1000 > 0) %>% 
+  arrange(desc(case_sum)) %>% top_n(300, wt=case_sum) 
+
+county_filtered <- subset(counties,counties$geo_value %in% todump$geo_value)
 ```
+
+
+
 
 
 ```{r calculate-roll-stats}
@@ -90,7 +95,9 @@ county_filtered <- county_filtered %>% group_by(geo_value)  %>% mutate(
     (dplyr::lag(flag) & !is.na(ststat) & ststat > sig_consec) |
     (dplyr::lead(flag) & is.na(ststat) & ftstat > sig_consec) |
     (dplyr::lag(flag) & is.na(ststat) & ftstat > sig_consec),
-    
+  RI_daily_flag = (geo_value=="44007" & value!=0 & 
+                     lead(value,n=1L)!=0 & lead(value,n=2L)!=0 
+                   & lead(value,n=3L)!=0)
   )
 
 
@@ -109,28 +116,27 @@ STATE_TO_FIPS = c( ## copied from somewhere in the bowels of the code
   'AS'='60', 'GU'='66', 'MP'='69', 'VI'='78', 'UM'='74'
 )
 
-county_filtered <-  county_filtered %>% mutate(FIP = substr(geo_value,1,2)) %>% mutate(state = names(STATE_TO_FIPS)[match(FIP,STATE_TO_FIPS)]) %>% select(-FIP) %>% relocate(state,.after=geo_value)
+county_filtered <-  county_filtered %>% 
+  mutate(FIP = substr(geo_value,1,2)) %>% 
+  mutate(state = names(STATE_TO_FIPS)[match(FIP,STATE_TO_FIPS)]) %>% 
+  select(-FIP) %>% relocate(state,.after=geo_value)
 
 ```
 
-
 ## visualize the outliers
-```{r fig.height = 70, fig.width = 18}
+```{r fig.height = 50, fig.width = 15}
 
 
-df <- county_filtered %>% 
-  left_join(county_census, by=c("geo_value"="FIPS")) %>%
-  unite(county,c("state","CTYNAME"), sep = ", ") %>%
-  mutate(pop = POPESTIMATE2019/100000)
+df <- county_filtered %>% unite(county,geo_value:state,sep = "_")
 df$county <- as.factor(df$county)
 
-  p <- ggplot(df %>% group_by(county)%>% filter(any(flag == 'TRUE')), aes(x=time_value, y=value/pop))+
+  p <- ggplot(df %>% group_by(county)%>% filter(any(flag == 'TRUE')), aes(x=time_value, y=value))+
         geom_line(aes(color="observed")) +
-    geom_line(aes(y=fmean/pop, color="filtered")) + 
-    geom_line(aes(y=smean/pop, color="smoothed")) +
+    geom_line(aes(y=fmean, color="filtered")) + 
+    geom_line(aes(y=smean, color="smoothed")) +
     geom_point(data=filter(df, flag), aes(color="outliers")) +
     facet_wrap_paginate(.~county,ncol=5,scales = 'free_y') + 
-    theme_cowplot() + xlab("date") + 
+    theme_cowplot()  + xlab("date")  +
     ylab(attributes(df)$metadata$signal) +
     scale_fill_manual(breaks=c("filtered","smoothed"), 
                       values=c("blue","darkgreen"))+
@@ -143,21 +149,17 @@ fixed_p <- set_panel_size(p,width  = unit(6, "cm"),height = unit(4, "cm"))
   grid.newpage(recording = TRUE)
 
   grid.draw(fixed_p)  
-  
-  #dev.off()
-  #34 states 
-#}
 ```
 
 
 #Outliers' table
 ```{r}
 outliers <-  df %>% group_by(county) %>% filter(flag == 'TRUE') %>%
- select(county,signal,time_value, value, fmean, fsd, smean, ssd) %>% arrange(time_value)
+ select(county,signal,time_value, value, fmean, fsd, smean, ssd) %>%
+  arrange(time_value)
 
 datatable(outliers,options = list(scrollX = TRUE, scrollY = "600px",paging = FALSE),rownames = NULL) %>% formatSignif(~fmean+fsd+smean+ssd,3)
 ```
-
 
 
 ## Make corrections
@@ -169,34 +171,50 @@ Now we use the "multinomial" smoother to backfill the excess of any flagged outl
 * It rounds alternate days up or down to try to avoid too much integers such that the sum is the excess.
 * Optionally allows for filling non-uniformly.
 
+# Treat all countys the same way
 
 ```{r}
 corrected_counties <- county_filtered %>% mutate(
    FIPS = as.numeric(geo_value),
    excess = value - na_replace(smedian, fmedian),
+   excess = floor(excess - excess_cut*sign(excess)*na_replace(smad,fmad)),
+   corrected = corrections_multinom_roll(
+     value, excess, flag, time_value, FIPS, backfill_lag))
+```
+
+# Treat RI and VA specially
+```{r}
+corrected_counties_2 <- county_filtered %>% 
+  mutate(
+    FIPS = as.numeric(geo_value),
+    excess = value - na_replace(smedian, fmedian),
     excess = floor(excess - excess_cut*sign(excess)*na_replace(smad,fmad)),
-  corrected = corrections_multinom_roll(value, excess, flag, time_value, FIPS, backfill_lag))
-
-
+    flag_bad_RI = (geo_value == "44007"  && lag(value) > 0),
+    corrected = corrections_multinom_roll(
+      value, value, flag_bad_RI, time_value, FIPS, 7),
+    flag_bad_VA =(geo_value == "51059"  && lag(value) > 0),
+    corrected = corrections_multinom_roll(
+      value, value, flag_bad_VA, time_value, FIPS, 7),
+    corrected = corrections_multinom_roll(
+      corrected, excess, flag &!flag_bad_RI &! flag_bad_VA, time_value, 
+      FIPS, backfill_lag))
 ```
 
 
 
-
-#Visualize corrected counties
+# Visualize corrected counties
 ```{r show-corrections, fig.height = 80, fig.width = 20}
 corrected_counties %>%
-  select(geo_value, time_value, value, corrected, flag) %>%
+  dplyr::select(geo_value, time_value, value, corrected, flag) %>%
   pivot_longer(value:corrected) %>%
-  ggplot(aes(time_value)) + geom_line(aes(y=value,color=name)) +
-  geom_point(data = filter(corrected_counties, flag), aes(y=value), color="red") +
-  facet_wrap(~geo_value, scales = "free_y", ncol = 5) +
-  theme_cowplot() + xlab("date") + 
-  ylab(attributes(county_filtered)$metadata$signal) +
+  ggplot(aes(time_value))+geom_line(aes(y=value, color=name))+
+  geom_point(
+    data = filter(corrected_counties, flag), aes(y=value), color="red")+ 
+  facet_wrap(~geo_value, scales = "free_y", ncol = 5)+
+  theme_cowplot()+xlab("date")+
+  ylab(attributes(county_filtered)$metadata$signal)+
   scale_color_viridis_d()
 ```
-
-
 
 
 ## Show all corrected time points
@@ -218,14 +236,13 @@ tosave = corrected_counties %>%
   filter(output) %>% ungroup() %>%
   dplyr::select(geo_value, time_value, value, corrected) %>%
   transmute(
-    location_name = geo_value, 
+    location = as.character(geo_value), 
     value = corrected,
-    issue_date = NA,
-    variable_name = "jhu-csse_deaths_incidence_num",
+    variable_name = "usa-facts_confirmed_incidence_num",
     #location = as.numeric(STATE_TO_FIPS[location_name]),
     reference_date = time_value) %>%
   filter(reference_date >= params$outlier_start_date) %>%
-  dplyr::select(location_name, reference_date, issue_date,
+  dplyr::select(location, reference_date,
                 variable_name, value)
 
 corrected_counties %>% 
@@ -243,13 +260,9 @@ corrected_counties %>%
 ```
 
 
-
-
-
-
-
-
-
+```{r eval=params$write_RDS}
+saveRDS(tosave, file="county_corrections_djm.RDS")
+```
 
 
 

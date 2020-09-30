@@ -1,0 +1,55 @@
+---
+title: "County Infection Rates"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library(covidcast)
+library(tidyverse)
+```
+
+```{r fig.height = 8, fig.width = 8}
+all_ctys = suppressMessages(
+  covidcast_signal(
+    "usa-facts","confirmed_incidence_num", 
+    geo_type = "county", 
+    start_day = NULL
+  )
+)
+```
+
+```{r fig.height = 8, fig.width = 8}
+forcast_locs <- all_ctys %>% group_by(geo_value) %>% 
+  summarise(
+    case_sum = sum(value, na.rm=TRUE),
+    max_value = max(value, na.rm = TRUE)) %>%
+  filter(as.numeric(geo_value) %% 1000 > 0) %>%
+  arrange(desc(case_sum)) %>% top_n(200, wt=case_sum)
+
+
+#Population (2019) in each county
+pop <- county_census %>% select(FIPS, POPESTIMATE2019)
+
+
+
+joined = left_join(all_ctys, forcast_locs) %>%filter(!is.na(case_sum), time_value == "2020-08-01") 
+  
+county_infect <-   left_join(joined,pop, by=c("geo_value"="FIPS")) %>% mutate(value = case_sum/POPESTIMATE2019)   
+
+plot(county_infect,range = range(county_infect$value),title="County Infection Rates (Top 200 Counties by case_sum)")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
